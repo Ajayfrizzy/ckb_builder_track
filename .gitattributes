@@ -1,0 +1,4 @@
+# Override linguist language detection
+Rust/*/target/** linguist-generated=true
+Rust/**/target/** linguist-generated=true
+*.d linguist-generated=true

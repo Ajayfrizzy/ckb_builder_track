@@ -1,0 +1,24 @@
+# Rust build artifacts
+**/target/
+*.pdb
+
+# Node.js
+node_modules/
+dist/
+build/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+# Logs
+*.log
+npm-debug.log*
+
+# Environment files
+.env
+.env.local
