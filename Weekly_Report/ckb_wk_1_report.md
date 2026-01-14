@@ -1,9 +1,9 @@
-## Builder Track Weekly Report — Week 1
+# Builder Track Weekly Report — Week 1
 
 **Name:** Oluwaseun Ajao
 **Week Ending:** 01-07-2026
 
-### Courses Completed
+## Courses Completed
 
 - Completed the first **two modules** of the CKB Academy:
   - **CKB Theoretical Knowledge**:
@@ -23,7 +23,7 @@
   - Functions
   - Data types
 
-### Practical Progress
+## Practical Progress
 
 - **Set up a local CKB dev node** successfully
 - Began using CLI tools(Wallet):
@@ -32,7 +32,7 @@
   - `get-live-cells`
 - Wrote and ran a **Rust Codes** to begin learning Rust for on-chain development
 
-### Environment
+## Environment
 
 - CKB node and local dev environment installed and functional
 - Basic CLI usage and debugging started
