@@ -1,6 +1,8 @@
 # Rust build artifacts
 **/target/
 *.pdb
+*.exe
+*.d
 
 # Node.js
 node_modules/
