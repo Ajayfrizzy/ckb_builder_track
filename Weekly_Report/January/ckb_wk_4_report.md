@@ -5,29 +5,33 @@
 
 ## Courses Covered
 
-##  **Delve into Spore Protocol**
+## **Delve into Spore Protocol**
 
 - Study about Digital Object (DOB)
 - Spore Protocol 101
-    - Learnt about On-chain asset
-    - How Minting works
+- Learnt about On-chain asset
+- How Minting works
 - How to `transfer spore`, `create spore`, `melt spore` and how to `encode sporeData`
 
 ## **Refresh my memory on the following topics**
-- CKB basic theoretical knowledge
-    - Cell
-    - **Lock script:** In a transaction, the lock scripts run for all inputs by group. It also used to protect the owner of a box.
-    - **Type script:** In a transaction, the type scripts run for all inputs and outputs by group.
 
-# **Nervos DAO Deposit and Withdraw RFC**
+- CKB basic theoretical knowledge
+
+1. Cell
+2. **Lock script:** In a transaction, the lock scripts run for all inputs by group. It also used to protect the owner of a box.
+3. **Type script:** In a transaction, the type scripts run for all inputs and outputs by group.
+
+## **Nervos DAO Deposit and Withdraw RFC**
 
 The Nervos DAO is a smart contract on the CKB blockchain that provides a dilution counter-measure for CKByte (CKB) holders. By depositing CKB into the DAO, users can earn proportional secondary issuance rewards, ensuring their holdings are only affected by the hard-capped primary issuance (similar to Bitcoin's model).
 
 - Key Learnings
-    - **Dilution Protection**: Counters the dilution effect from CKB's secondary issuance
-    - **Time-based Deposits**: Minimum deposit period counted in blocks
-    - **Automatic Renewal**: Deposits automatically enter new periods if not withdrawn
-    - **Two-Phase Withdrawal**: Secure withdrawal process with compensation calculation
+
+1. **Dilution Protection**: Counters the dilution effect from CKB's secondary issuance
+2. **Time-based Deposits**: Minimum deposit period counted in blocks
+3. **Automatic Renewal**: Deposits automatically enter new periods if not withdrawn
+4. **Two-Phase Withdrawal**: Secure withdrawal process with compensation calculation
+
 - CKB Token Issuance Model
 CKB has a dual issuance model:
     1. **Primary Issuance**: Hard-capped issuance for miners (same curve as Bitcoin)
