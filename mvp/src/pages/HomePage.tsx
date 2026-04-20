@@ -1,12 +1,15 @@
 import { Link } from "react-router-dom";
 import { ccc } from "@ckb-ccc/connector-react";
 import { useEffect, useState } from "react";
+import CopyButton from "../components/CopyButton";
+import { DEFAULT_NETWORK, NETWORK_CONFIGS, isVaultScriptsReady } from "../config";
+import { formatAddress } from "../lib/display";
 
 export default function HomePage() {
   const { wallet, open } = ccc.useCcc();
   const signer = ccc.useSigner();
-  const [address, setAddress] = useState<string>("");
-  const [balance, setBalance] = useState<string>("");
+  const [address, setAddress] = useState("");
+  const [balance, setBalance] = useState("");
 
   useEffect(() => {
     if (!signer) return;
@@ -24,97 +27,201 @@ export default function HomePage() {
     })();
   }, [signer]);
 
+  const scriptsReady = isVaultScriptsReady(DEFAULT_NETWORK);
+  const networkLabel = NETWORK_CONFIGS[DEFAULT_NETWORK].label;
+  const quickNotes = [
+    "Choose who should receive the vault.",
+    "Set the amount and the unlock moment.",
+    "Track whether the vault is pending, live, or ready.",
+  ];
+
   return (
-    <div className="max-w-4xl mx-auto px-4 md:px-6 py-6 md:py-12 text-[#00d4aa]">
-      <section className="text-center py-8 md:py-12">
-        <h1 className="text-3xl md:text-5xl font-bold mb-4">
-          🔐 InheritVault
-        </h1>
-        <p className="text-lg md:text-xl opacity-80 mb-8">
-          Create time-locked inheritance vaults on Nervos CKB
-        </p>
-
-        {wallet ? (
-          <div className="bg-gray-800 border border-gray-700 text-[#00d4aa] rounded-lg p-4 md:p-6 max-w-2xl mx-auto">
-            <h3 className="text-xl md:text-2xl font-semibold mb-4">Connected</h3>
-            <div className="mb-4">
-              <div className="text-xs md:text-sm opacity-70 mb-1">Address</div>
-              <div className="font-mono text-xs md:text-sm break-all">
-                {address || "Loading..."}
-              </div>
-            </div>
-            <div className="mb-6">
-              <div className="text-xs md:text-sm opacity-70 mb-1">Balance</div>
-              <div className="text-2xl md:text-3xl font-bold">
-                {balance || "..."} CKB
-              </div>
-            </div>
-            <div className="flex flex-col sm:flex-row gap-4 justify-center">
-              <Link to="/create">
-                <button className="w-full sm:w-auto bg-gray-800 hover:bg-gray-700 font-semibold px-6 py-3 rounded-lg transition-colors border border-[#00d4aa] text-[#00d4aa] cursor-pointer">
-                  Create Vault
-                </button>
-              </Link>
-              <Link to="/vaults">
-                <button className="w-full sm:w-auto bg-gray-800 hover:bg-gray-700 px-6 py-3 rounded-lg border border-[#00d4aa] text-[#00d4aa] cursor-pointer transition-colors">
-                  My Vaults
-                </button>
-              </Link>
-              <Link to="/beneficiary">
-                <button className="w-full sm:w-auto bg-gray-800 hover:bg-gray-700 px-6 py-3 rounded-lg border border-[#00d4aa] text-[#00d4aa] cursor-pointer transition-colors">
-                  Beneficiary Dashboard
-                </button>
-              </Link>
-            </div>
-          </div>
-        ) : (
+    <div className="page-shell">
+      <section className="panel-strong">
+        <div className="grid gap-8 xl:grid-cols-[1.15fr_0.85fr] xl:items-start">
           <div>
-            <button 
-              className="bg-primary border border-[#00d4aa] font-semibold px-8 py-4 rounded-lg transition-colors text-base md:text-lg cursor-pointer"
-              onClick={open}
-            >
-              Connect Wallet to Get Started
-            </button>
+            <div className="section-eyebrow">Digital inheritance planning</div>
+            <h1 className="page-title mt-4">
+              Prepare a secure CKB vault for the people you care about.
+            </h1>
+            <p className="page-subtitle mt-4">
+              Set the amount, choose the beneficiary, and decide when the funds
+              can be claimed. InheritVault keeps the flow readable so you can
+              focus on the handoff, not the chain details.
+            </p>
+
+            <div className="mt-6 flex flex-wrap gap-3">
+              <span className="address-pill">Time-locked release</span>
+              <span className="address-pill">Beneficiary-ready records</span>
+              <span className="address-pill">Clear vault tracking</span>
+            </div>
+
+            <div className="mt-8 flex flex-col gap-3 sm:flex-row">
+              {wallet ? (
+                <>
+                  <Link to="/create" className="button-primary">
+                    Create a Vault
+                  </Link>
+                  <Link to="/vaults" className="button-secondary">
+                    Review My Vaults
+                  </Link>
+                </>
+              ) : (
+                <button className="button-primary" onClick={open}>
+                  Connect Wallet to Begin
+                </button>
+              )}
+              <Link to="/beneficiary" className="button-secondary">
+                Beneficiary View
+              </Link>
+            </div>
+
+            <div className="mt-8 grid gap-3 sm:grid-cols-3">
+              {quickNotes.map((note, index) => (
+                <div key={note} className="metric-card">
+                  <div className="text-xs uppercase tracking-[0.22em] text-[#83e8d4]">
+                    Step {index + 1}
+                  </div>
+                  <p className="mt-3 text-sm leading-6 text-[#d7f6ef]">{note}</p>
+                </div>
+              ))}
+            </div>
           </div>
-        )}
+
+          <div className="space-y-4">
+            <div
+              className={`status-banner ${
+                scriptsReady
+                  ? "status-banner-success"
+                  : "status-banner-warning"
+              }`}
+            >
+              {scriptsReady
+                ? `Vault creation is currently available on ${networkLabel}.`
+                : `Vault creation is temporarily unavailable on ${networkLabel}. You can still review saved records and inspect existing vaults.`}
+            </div>
+
+            <div className="panel-muted">
+              {wallet ? (
+                <>
+                  <div className="section-eyebrow">Connected wallet</div>
+                  <div className="mt-4 text-2xl font-semibold text-[#f2fffb]">
+                    Ready to create or review vaults
+                  </div>
+
+                  <div className="mt-5 space-y-4">
+                    <div className="metric-card">
+                      <div className="text-xs uppercase tracking-[0.22em] text-[#83e8d4]">
+                        Address
+                      </div>
+                      <div className="mt-3 flex flex-wrap items-center gap-2">
+                        <span className="address-pill mono-text">
+                          {address ? formatAddress(address, 14, 10) : "Loading..."}
+                        </span>
+                        <CopyButton value={address} label="Copy address" />
+                      </div>
+                      {address && (
+                        <details className="mt-3">
+                          <summary className="cursor-pointer text-sm font-medium text-[#83e8d4]">
+                            Show full address
+                          </summary>
+                          <div className="field-hint mono-text break-all">
+                            {address}
+                          </div>
+                        </details>
+                      )}
+                    </div>
+
+                    <div className="grid gap-3 xl:grid-cols-2">
+                      <div className="metric-card">
+                        <div className="text-xs uppercase tracking-[0.22em] text-[#83e8d4]">
+                          Balance
+                        </div>
+                        <div className="mt-3 break-all text-[clamp(2rem,4vw,2.75rem)] font-semibold leading-tight text-white">
+                          {balance || "..."}
+                        </div>
+                        <div className="mt-2 text-xl font-semibold text-white">
+                          CKB
+                        </div>
+                      </div>
+
+                      <div className="metric-card">
+                        <div className="text-xs uppercase tracking-[0.22em] text-[#83e8d4]">
+                          Network
+                        </div>
+                        <div className="mt-3 break-words text-lg font-semibold text-white">
+                          {networkLabel}
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </>
+              ) : (
+                <>
+                  <div className="section-eyebrow">Before you start</div>
+                  <div className="mt-4 text-2xl font-semibold text-[#f2fffb]">
+                    Gather the details once, then create with confidence
+                  </div>
+                  <ul className="mt-5 space-y-3 text-sm leading-7 text-[#d7f6ef]">
+                    <li>Confirm the beneficiary address carefully.</li>
+                    <li>Pick an unlock date or block height that gives you a clear safety window.</li>
+                    <li>Keep the transaction hash so the vault can always be verified later.</li>
+                  </ul>
+                </>
+              )}
+            </div>
+          </div>
+        </div>
       </section>
 
-      <section className="bg-gray-800 border border-gray-700 rounded-lg p-4 md:p-6 mt-8 md:mt-12">
-        <h2 className="text-xl md:text-2xl font-semibold mb-4">How It Works</h2>
-        <ol className="space-y-3 md:space-y-4 pl-5 list-decimal text-sm md:text-base leading-relaxed">
-          <li>
-            <strong>Connect your CKB wallet</strong> using any CCC-compatible wallet (JoyID, MetaMask, etc.)
-          </li>
-          <li>
-            <strong>Create a vault</strong> by specifying:
-            <ul className="mt-2 pl-6 list-disc space-y-1">
-              <li>Beneficiary's CKB address</li>
-              <li>Amount of CKB to lock</li>
-              <li>Unlock condition (block height or timestamp)</li>
-            </ul>
-          </li>
-          <li>
-            <strong>The vault is created on-chain</strong> as a cell with the beneficiary's lock – all metadata (owner, unlock condition, memo) is stored in the cell data
-          </li>
-          <li>
-            <strong>The beneficiary can see pending vaults</strong> by connecting their wallet on the Beneficiary Dashboard – vaults are verified directly from the blockchain
-          </li>
-          <li>
-            <strong>The beneficiary claims</strong> the funds after the unlock condition is met
-          </li>
-        </ol>
+      <section className="mt-6 grid gap-4 lg:grid-cols-3">
+        <div className="panel card-hover">
+          <div className="section-eyebrow">1. Set it up</div>
+          <h2 className="mt-4 text-2xl font-semibold text-white">
+            Choose the beneficiary and the amount
+          </h2>
+          <p className="field-hint">
+            The creation flow keeps the important decisions in plain language so
+            the recipient, amount, and notifications are easy to review before
+            you submit.
+          </p>
+        </div>
+
+        <div className="panel card-hover">
+          <div className="section-eyebrow">2. Lock it intentionally</div>
+          <h2 className="mt-4 text-2xl font-semibold text-white">
+            Pick the exact moment the vault becomes claimable
+          </h2>
+          <p className="field-hint">
+            You can plan around a block height or a calendar time. The app
+            keeps reminding you what the beneficiary will have to wait for.
+          </p>
+        </div>
+
+        <div className="panel card-hover">
+          <div className="section-eyebrow">3. Track the outcome</div>
+          <h2 className="mt-4 text-2xl font-semibold text-white">
+            Watch it move from pending to live to ready
+          </h2>
+          <p className="field-hint">
+            Owner and beneficiary views both focus on status, unlock timing, and
+            quick verification instead of making you decode raw chain data.
+          </p>
+        </div>
       </section>
 
-      <section className="bg-gray-800 border border-gray-700 rounded-lg p-4 md:p-6 mt-4">
-        <h2 className="text-xl md:text-2xl font-semibold mb-4">⚠️ Important Notes</h2>
-        <ul className="space-y-2 md:space-y-3 pl-5 list-disc text-sm md:text-base leading-relaxed">
-          <li>This is an <strong>MVP demonstration</strong> – use testnet only</li>
-          <li>Vault data is stored <strong>on-chain</strong> in cell output data – no more localStorage dependency</li>
-          <li>Beneficiaries can <strong>verify any vault</strong> by checking its transaction hash on-chain</li>
-          <li>The beneficiary must have access to their wallet to claim</li>
-          <li>Transaction fees apply when creating and claiming vaults</li>
-          <li>Double-check the beneficiary address before creating a vault</li>
-        </ul>
+      <section className="mt-6">
+        <div className="panel-muted max-w-3xl">
+          <div className="section-eyebrow">Important note</div>
+          <h2 className="mt-4 text-2xl font-semibold text-white">
+            Use this carefully and verify the details.
+          </h2>
+          <ul className="mt-5 space-y-3 text-sm leading-7 text-[#d7f6ef]">
+            <li>Double-check every beneficiary address before creating a vault.</li>
+            <li>Transaction fees apply when creating and claiming.</li>
+            <li>Stick to testnet habits and verification steps before treating any flow as production-ready.</li>
+          </ul>
+        </div>
       </section>
     </div>
   );

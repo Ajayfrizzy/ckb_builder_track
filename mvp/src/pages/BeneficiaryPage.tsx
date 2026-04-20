@@ -1,18 +1,14 @@
-// ─────────────────────────────────────────────────────────────────────────────
-// InheritVault – Beneficiary Dashboard
-//
-// Allows a beneficiary to:
-//   • See all live vault cells created for them (queried on-chain)
-//   • Verify each vault's authenticity (on-chain proof)
-//   • Navigate to vault detail / claim page
-//   • Verify any vault by entering a transaction hash
-// ─────────────────────────────────────────────────────────────────────────────
-
 import { useState, useEffect } from "react";
 import { Link } from "react-router-dom";
 import { ccc } from "@ckb-ccc/connector-react";
-import { DEFAULT_NETWORK, NETWORK_CONFIGS } from "../config";
-import { getLockScriptForIndexer } from "../lib/ccc";
+import CopyButton from "../components/CopyButton";
+import {
+  DEFAULT_NETWORK,
+  NETWORK_CONFIGS,
+  isVaultScriptsReady,
+} from "../config";
+import { getTipHeader } from "../lib/ckb";
+import { getScriptedVaultLockForIndexer, isUnlockConditionSatisfied } from "../lib/ccc";
 import { getHiddenVaults, hideVault, unhideVault } from "../lib/storage";
 import {
   fetchVaultsForLockScript,
@@ -20,10 +16,26 @@ import {
   type OnChainVault,
   type VaultFromTx,
 } from "../lib/vaultIndexer";
+import {
+  describeUnlock,
+  formatAddress,
+  formatUnlock,
+} from "../lib/display";
+
+type BeneficiaryFilter = "all" | "ready" | "locked";
+
+function explorerTxUrl(txHash: string) {
+  return `${NETWORK_CONFIGS[DEFAULT_NETWORK].explorerTxUrl}${txHash}`;
+}
+
+function vaultKey(vault: OnChainVault) {
+  return `${vault.outPoint.txHash}:${vault.outPoint.index}`;
+}
 
 export default function BeneficiaryPage() {
   const { wallet, open } = ccc.useCcc();
   const signer = ccc.useSigner();
+  const scriptsReady = isVaultScriptsReady(DEFAULT_NETWORK);
 
   const [vaults, setVaults] = useState<OnChainVault[]>([]);
   const [loading, setLoading] = useState(false);
@@ -31,48 +43,72 @@ export default function BeneficiaryPage() {
   const [address, setAddress] = useState("");
   const [hiddenKeys, setHiddenKeys] = useState<Set<string>>(getHiddenVaults());
   const [showHidden, setShowHidden] = useState(false);
+  const [filter, setFilter] = useState<BeneficiaryFilter>("all");
+  const [currentBlockHeight, setCurrentBlockHeight] = useState(0);
+  const [currentTimestamp, setCurrentTimestamp] = useState(
+    Math.floor(Date.now() / 1000)
+  );
 
-  // ── Verify section state ──────────────────────────────────────────────
   const [verifyTxHash, setVerifyTxHash] = useState("");
   const [verifyIndex, setVerifyIndex] = useState("0");
   const [verifying, setVerifying] = useState(false);
   const [verifyResult, setVerifyResult] = useState<VaultFromTx | null>(null);
   const [verifyError, setVerifyError] = useState("");
 
-  // ── Fetch beneficiary's vaults from chain ─────────────────────────────
   useEffect(() => {
-    if (!signer) return;
+    if (!signer || !scriptsReady) return;
+
+    let cancelled = false;
 
     (async () => {
       setLoading(true);
       setError("");
       try {
-        const addr = await signer.getRecommendedAddress();
-        setAddress(addr);
+        const [nextAddress, tip] = await Promise.all([
+          signer.getRecommendedAddress(),
+          getTipHeader(DEFAULT_NETWORK),
+        ]);
 
-        const lockScript = await getLockScriptForIndexer(addr, signer);
-        const results = await fetchVaultsForLockScript(
-          DEFAULT_NETWORK,
-          lockScript
+        if (cancelled) return;
+
+        setAddress(nextAddress);
+        setCurrentBlockHeight(tip.blockNumber);
+        setCurrentTimestamp(tip.timestamp);
+
+        const scriptedLock = await getScriptedVaultLockForIndexer(
+          nextAddress,
+          signer,
+          DEFAULT_NETWORK
         );
-        setVaults(results);
+
+        const results = await fetchVaultsForLockScript(DEFAULT_NETWORK, scriptedLock);
+        if (!cancelled) {
+          setVaults(results);
+        }
       } catch (err: any) {
         console.error("Failed to fetch beneficiary vaults:", err);
-        setError(err.message || "Failed to query vaults from chain");
+        if (!cancelled) {
+          setError(err.message || "Failed to query vaults from chain.");
+        }
       } finally {
-        setLoading(false);
+        if (!cancelled) {
+          setLoading(false);
+        }
       }
     })();
-  }, [signer]);
 
-  // ── Verify a vault by txHash ──────────────────────────────────────────
+    return () => {
+      cancelled = true;
+    };
+  }, [signer, scriptsReady]);
+
   const handleVerify = async () => {
     setVerifyError("");
     setVerifyResult(null);
 
     const hash = verifyTxHash.trim();
     if (!hash || !hash.startsWith("0x") || hash.length !== 66) {
-      setVerifyError("Please enter a valid 0x-prefixed transaction hash (66 characters).");
+      setVerifyError("Please enter a valid 0x-prefixed transaction hash.");
       return;
     }
 
@@ -84,340 +120,516 @@ export default function BeneficiaryPage() {
         parseInt(verifyIndex || "0", 10)
       );
       if (!result) {
-        setVerifyError(
-          "No InheritVault cell found at this transaction hash and index. " +
-          "The vault may not exist or the transaction hash is incorrect."
-        );
+        setVerifyError("No compatible vault was found at that hash and output index.");
       } else {
         setVerifyResult(result);
       }
     } catch (err: any) {
-      setVerifyError(err.message || "Verification failed");
+      setVerifyError(err.message || "Verification failed.");
     } finally {
       setVerifying(false);
     }
   };
 
-  // ── Helpers ───────────────────────────────────────────────────────────
-  const formatUnlock = (vault: OnChainVault | VaultFromTx) => {
-    const { type, value } = vault.data.unlock;
-    if (type === "blockHeight") {
-      return `Block ${value.toLocaleString()}`;
-    }
-    return new Date(value * 1000).toLocaleString();
-  };
+  const isReady = (vault: OnChainVault) =>
+    isUnlockConditionSatisfied(
+      vault.data.unlock,
+      currentBlockHeight,
+      currentTimestamp
+    );
 
-  const explorerTxUrl = (txHash: string) =>
-    `${NETWORK_CONFIGS[DEFAULT_NETWORK].explorerTxUrl}${txHash}`;
+  const readyCount = vaults.filter(isReady).length;
+  const hiddenCount = vaults.filter((vault) => hiddenKeys.has(vaultKey(vault))).length;
+  const filteredVaults = vaults.filter((vault) => {
+    if (filter === "all") return true;
+    if (filter === "ready") return isReady(vault);
+    return !isReady(vault);
+  });
+  const visibleVaults = filteredVaults.filter(
+    (vault) => showHidden || !hiddenKeys.has(vaultKey(vault))
+  );
 
-  const vaultKey = (v: OnChainVault) => `${v.outPoint.txHash}:${v.outPoint.index}`;
-
-  const visibleVaults = showHidden
-    ? vaults
-    : vaults.filter((v) => !hiddenKeys.has(vaultKey(v)));
-
-  const hiddenCount = vaults.filter((v) => hiddenKeys.has(vaultKey(v))).length;
-
-  const handleHide = (v: OnChainVault, e: React.MouseEvent) => {
-    e.preventDefault(); // prevent Link navigation
-    e.stopPropagation();
-    hideVault(v.outPoint.txHash, v.outPoint.index);
+  const handleHide = (vault: OnChainVault, event: React.MouseEvent) => {
+    event.preventDefault();
+    event.stopPropagation();
+    hideVault(vault.outPoint.txHash, vault.outPoint.index);
     setHiddenKeys(new Set(getHiddenVaults()));
   };
 
-  const handleUnhide = (v: OnChainVault, e: React.MouseEvent) => {
-    e.preventDefault();
-    e.stopPropagation();
-    unhideVault(v.outPoint.txHash, v.outPoint.index);
+  const handleUnhide = (vault: OnChainVault, event: React.MouseEvent) => {
+    event.preventDefault();
+    event.stopPropagation();
+    unhideVault(vault.outPoint.txHash, vault.outPoint.index);
     setHiddenKeys(new Set(getHiddenVaults()));
   };
 
-  // ── Not connected ─────────────────────────────────────────────────────
+  const renderVerifySection = () => (
+    <details className="disclosure mt-6">
+      <summary className="disclosure-summary">
+        <div>
+          <div className="font-semibold text-white">Advanced tools</div>
+          <div className="disclosure-copy">
+            Verify a vault directly from its transaction hash and output index.
+          </div>
+        </div>
+        <span className="text-sm font-semibold text-[#83e8d4]">Open</span>
+      </summary>
+
+      <div className="border-t border-white/10 px-6 py-6">
+        <div className="grid gap-4 lg:grid-cols-[1fr_auto] lg:items-end">
+          <div>
+            <label className="field-label">Transaction Hash</label>
+            <input
+              type="text"
+              value={verifyTxHash}
+              onChange={(event) => setVerifyTxHash(event.target.value)}
+              placeholder="0x..."
+              className="input-base"
+            />
+          </div>
+
+          <div className="flex flex-col gap-4 sm:flex-row lg:items-end">
+            <div>
+              <label className="field-label">Output Index</label>
+              <input
+                type="number"
+                value={verifyIndex}
+                onChange={(event) => setVerifyIndex(event.target.value)}
+                min={0}
+                className="input-base w-full sm:w-32"
+              />
+            </div>
+
+            <button
+              onClick={handleVerify}
+              disabled={verifying}
+              className="button-primary"
+            >
+              {verifying ? "Verifying..." : "Verify Vault"}
+            </button>
+          </div>
+        </div>
+
+        {verifyError && (
+          <div className="status-banner status-banner-danger mt-4">
+            {verifyError}
+          </div>
+        )}
+
+        {verifyResult && (
+          <div className="panel mt-6 !p-5">
+            <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
+              <div>
+                <div className="section-eyebrow">Verification result</div>
+                <h3 className="mt-3 text-2xl font-semibold text-white">
+                  {verifyResult.capacityCKB} CKB
+                </h3>
+              </div>
+
+              <div
+                className={`status-banner !py-2 !text-sm ${
+                  verifyResult.isAuthentic
+                    ? "status-banner-success"
+                    : "status-banner-warning"
+                }`}
+              >
+                {verifyResult.isAuthentic
+                  ? "Authenticated scripted vault"
+                  : "Legacy compatibility record"}
+              </div>
+            </div>
+
+            <div className="mt-5 grid gap-4 md:grid-cols-2">
+              <div className="metric-card">
+                <div className="text-xs uppercase tracking-[0.22em] text-[#83e8d4]">
+                  Created by
+                </div>
+                <div className="mt-3 text-sm font-semibold text-white">
+                  {verifyResult.data.ownerName || "Unknown"}
+                </div>
+                <div className="field-hint mono-text break-all">
+                  {verifyResult.data.ownerAddress || "Unavailable"}
+                </div>
+              </div>
+
+              <div className="metric-card">
+                <div className="text-xs uppercase tracking-[0.22em] text-[#83e8d4]">
+                  Beneficiary
+                </div>
+                <div className="mt-3 text-sm font-semibold text-white">
+                  {verifyResult.beneficiaryAddress || "Unavailable"}
+                </div>
+              </div>
+
+              <div className="metric-card">
+                <div className="text-xs uppercase tracking-[0.22em] text-[#83e8d4]">
+                  Unlock
+                </div>
+                <div className="mt-3 text-sm font-semibold text-white">
+                  {formatUnlock(verifyResult.data.unlock)}
+                </div>
+              </div>
+
+              <div className="metric-card">
+                <div className="text-xs uppercase tracking-[0.22em] text-[#83e8d4]">
+                  Cell status
+                </div>
+                <div className="mt-3 text-sm font-semibold text-white">
+                  {verifyResult.isLive ? "Live" : "Spent"}
+                </div>
+              </div>
+            </div>
+
+            {verifyResult.data.memo && (
+              <div className="metric-card mt-4">
+                <div className="text-xs uppercase tracking-[0.22em] text-[#83e8d4]">
+                  Memo
+                </div>
+                <div className="mt-3 text-sm leading-7 text-[#d7f6ef]">
+                  {verifyResult.data.memo}
+                </div>
+              </div>
+            )}
+
+            <div className="mt-5 flex flex-col gap-3 sm:flex-row">
+              <a
+                href={explorerTxUrl(verifyResult.outPoint.txHash)}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="button-secondary"
+              >
+                View on Explorer
+              </a>
+              <Link
+                to={`/vault/${verifyResult.outPoint.txHash}/${verifyResult.outPoint.index}`}
+                className="button-secondary"
+              >
+                Open Detail View
+              </Link>
+            </div>
+          </div>
+        )}
+      </div>
+    </details>
+  );
+
   if (!wallet) {
     return (
-      <div className="max-w-4xl mx-auto px-4 md:px-6 py-6 md:py-12 text-[#00d4aa]">
+      <div className="page-shell">
         <div className="mb-6">
-          <Link to="/" className="text-sm md:text-base text-[#00d4aa] hover:underline transition-colors">← Back to Home</Link>
-        </div>
-        <h1 className="text-2xl md:text-4xl font-bold mb-6 md:mb-8">
-          Beneficiary Dashboard
-        </h1>
-        <div className="bg-gray-800 border border-gray-700 rounded-lg p-6 text-center">
-          <p className="opacity-80 mb-4">
-            Connect your wallet to see vaults created for you.
-          </p>
-          <button
-            onClick={open}
-            className="bg-gray-800 hover:bg-gray-700 text-[#00d4aa] font-semibold px-6 py-3 rounded-lg border border-[#00d4aa] transition-colors"
-          >
-            Connect Wallet
-          </button>
+          <Link to="/" className="inline-link">
+            {"<- Back to Home"}
+          </Link>
         </div>
 
-        {/* Verify section available even without wallet */}
+        <section className="panel-strong max-w-4xl">
+          <div className="section-eyebrow">Beneficiary dashboard</div>
+          <h1 className="page-title mt-4">
+            Connect the beneficiary wallet to check incoming vaults.
+          </h1>
+          <p className="page-subtitle mt-4">
+            Once connected, this view scans for vaults created for your address
+            and highlights which ones are already claimable.
+          </p>
+
+          <div className="mt-8 flex flex-col gap-3 sm:flex-row">
+            <button onClick={open} className="button-primary">
+              Connect Wallet
+            </button>
+            <Link to="/vaults" className="button-secondary">
+              Review Owner View
+            </Link>
+          </div>
+        </section>
+
         {renderVerifySection()}
       </div>
     );
   }
 
-  // ── Connected ─────────────────────────────────────────────────────────
   return (
-    <div className="max-w-4xl mx-auto px-4 md:px-6 py-6 md:py-12 text-[#00d4aa]">
+    <div className="page-shell">
       <div className="mb-6">
-        <Link to="/" className="text-sm md:text-base text-[#00d4aa] hover:underline transition-colors">← Back to Home</Link>
+        <Link to="/" className="inline-link">
+          {"<- Back to Home"}
+        </Link>
       </div>
-      <h1 className="text-2xl md:text-4xl font-bold mb-2">
-        Beneficiary Dashboard
-      </h1>
-      <p className="text-sm opacity-70 mb-6 md:mb-8 break-all">
-        Connected: {address.slice(0, 16)}...{address.slice(-8)}
-      </p>
 
-      {/* ── Error ─────────────────────────────────────────────────────── */}
-      {error && (
-        <div className="bg-red-500 bg-opacity-10 border border-red-500 rounded-lg p-4 mb-6 text-white text-sm">
-          {error}
-        </div>
-      )}
+      <section className="panel-strong">
+        <div className="grid gap-6 xl:grid-cols-[1.1fr_0.9fr] xl:items-end">
+          <div>
+            <div className="section-eyebrow">Beneficiary dashboard</div>
+            <h1 className="page-title mt-4">
+              See what has been prepared for this wallet.
+            </h1>
+            <p className="page-subtitle mt-4">
+              This view focuses on what you can act on: who created the vault,
+              how much is there, and whether it is still locked or ready to
+              claim.
+            </p>
+          </div>
 
-      {/* ── Loading ───────────────────────────────────────────────────── */}
-      {loading && (
-        <div className="bg-gray-800 border border-gray-700 rounded-lg p-8 text-center mb-8">
-          <div className="spinner mb-4" />
-          <p className="opacity-70">Scanning the chain for your vaults…</p>
-        </div>
-      )}
-
-      {/* ── Vault list ────────────────────────────────────────────────── */}
-      {!loading && vaults.length === 0 && (
-        <div className="bg-gray-800 border border-gray-700 rounded-lg p-8 text-center mb-8">
-          <p className="opacity-70">
-            No vaults found for your address on{" "}
-            <span className="capitalize">{DEFAULT_NETWORK}</span>.
-          </p>
-          <p className="text-sm opacity-50 mt-2">
-            If someone created a vault for you, it may take a few minutes to
-            appear after the transaction is confirmed.
-          </p>
-        </div>
-      )}
-
-      {!loading && vaults.length > 0 && (
-        <>
-          <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-2 mb-4">
-            <h2 className="text-xl md:text-2xl font-semibold">
-              Your Vaults ({visibleVaults.length})
-            </h2>
-            {hiddenCount > 0 && (
-              <button
-                onClick={() => setShowHidden(!showHidden)}
-                className="text-xs text-[#00d4aa] opacity-70 hover:opacity-100 transition-opacity"
-              >
-                {showHidden ? "Hide dismissed" : `Show ${hiddenCount} dismissed`}
-              </button>
+          <div className="panel-muted !p-5">
+            <div className="text-xs uppercase tracking-[0.22em] text-[#83e8d4]">
+              Connected address
+            </div>
+            <div className="mt-3 flex flex-wrap items-center gap-2">
+              <span className="address-pill mono-text">
+                {address ? formatAddress(address, 14, 10) : "Loading..."}
+              </span>
+              <CopyButton value={address} label="Copy address" />
+            </div>
+            {address && (
+              <div className="field-hint mono-text break-all">{address}</div>
             )}
           </div>
-          <div className="space-y-4 mb-8">
-            {visibleVaults.map((v) => {
-              const isHidden = hiddenKeys.has(vaultKey(v));
-              return (
-              <Link
-                key={`${v.outPoint.txHash}-${v.outPoint.index}`}
-                to={`/vault/${v.outPoint.txHash}/${v.outPoint.index}`}
-                className="block"
-              >
-                <div className={`bg-gray-800 border rounded-lg p-4 md:p-6 transition-all ${
-                  isHidden ? "border-gray-600 opacity-50" : "border-gray-700 hover:border-[#00d4aa]"
-                }`}>
-                  <div className="flex flex-col sm:flex-row justify-between items-start gap-4 mb-4">
-                    <div className="flex-1">
-                      <h3 className="text-xl md:text-2xl font-semibold mb-1">
-                        {v.capacityCKB} CKB
-                      </h3>
-                      {v.data.memo && (
-                        <p className="text-sm opacity-70">{v.data.memo}</p>
-                      )}
-                    </div>
-                    <div className="flex items-center gap-3">
-                      <span className="text-xs md:text-sm text-green-500 flex items-center gap-1">
-                        <span className="inline-block w-2 h-2 rounded-full bg-green-500" />
-                        On-Chain Verified
-                      </span>
-                      {isHidden ? (
-                        <button
-                          onClick={(e) => handleUnhide(v, e)}
-                          className="text-xs text-[#00d4aa] hover:underline opacity-70 hover:opacity-100"
-                          title="Restore this vault"
-                        >
-                          Restore
-                        </button>
-                      ) : (
-                        <button
-                          onClick={(e) => handleHide(v, e)}
-                          className="text-xs text-gray-500 hover:text-red-400 transition-colors"
-                          title="Dismiss this vault"
-                        >
-                          ✕
-                        </button>
-                      )}
-                    </div>
-                  </div>
+        </div>
 
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-sm">
-                    <div>
-                      <div className="opacity-70 mb-1">From</div>
-                      <div className="font-semibold">
-                        {v.data.ownerName || "Unknown"}
-                      </div>
-                      <div className="font-mono text-xs opacity-60 break-all">
-                        {v.data.ownerAddress.slice(0, 12)}...
-                        {v.data.ownerAddress.slice(-6)}
-                      </div>
-                    </div>
-                    <div>
-                      <div className="opacity-70 mb-1">Unlocks</div>
-                      <div>{formatUnlock(v)}</div>
-                    </div>
-                  </div>
-                </div>
-              </Link>
-              );
-            })}
+        <div className="mt-8 grid gap-4 md:grid-cols-4">
+          <div className="metric-card">
+            <div className="text-xs uppercase tracking-[0.22em] text-[#83e8d4]">
+              Found vaults
+            </div>
+            <div className="mt-3 text-3xl font-semibold text-white">
+              {vaults.length}
+            </div>
           </div>
+
+          <div className="metric-card">
+            <div className="text-xs uppercase tracking-[0.22em] text-[#83e8d4]">
+              Ready now
+            </div>
+            <div className="mt-3 text-3xl font-semibold text-white">
+              {readyCount}
+            </div>
+          </div>
+
+          <div className="metric-card">
+            <div className="text-xs uppercase tracking-[0.22em] text-[#83e8d4]">
+              Still locked
+            </div>
+            <div className="mt-3 text-3xl font-semibold text-white">
+              {vaults.length - readyCount}
+            </div>
+          </div>
+
+          <div className="metric-card">
+            <div className="text-xs uppercase tracking-[0.22em] text-[#83e8d4]">
+              Dismissed
+            </div>
+            <div className="mt-3 text-3xl font-semibold text-white">
+              {hiddenCount}
+            </div>
+          </div>
+        </div>
+      </section>
+
+      {!scriptsReady && (
+        <div className="status-banner status-banner-warning mt-6">
+          Vault discovery is not available right now, but the advanced tools
+          below can still verify a vault by transaction hash.
+        </div>
+      )}
+
+      {error && (
+        <div className="status-banner status-banner-danger mt-6">{error}</div>
+      )}
+
+      {loading && (
+        <section className="panel mt-6 text-center">
+          <div className="spinner mb-4" />
+          <p className="text-sm text-[#9dbfb7]">
+            Scanning the chain for vaults created for your address...
+          </p>
+        </section>
+      )}
+
+      {!loading && scriptsReady && (
+        <>
+          <section className="panel mt-6">
+            <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
+              <div>
+                <div className="section-eyebrow">Browse</div>
+                <h2 className="mt-3 text-2xl font-semibold text-white">
+                  Focus on what is claimable first
+                </h2>
+              </div>
+
+              <div className="flex flex-col gap-3 lg:items-end">
+                <div className="flex flex-wrap gap-2">
+                  {(
+                    [
+                      ["all", "All"],
+                      ["ready", "Ready"],
+                      ["locked", "Locked"],
+                    ] as Array<[BeneficiaryFilter, string]>
+                  ).map(([value, label]) => (
+                    <button
+                      key={value}
+                      type="button"
+                      className={`${
+                        filter === value
+                          ? "button-chip button-chip-active"
+                          : "button-chip"
+                      }`}
+                      onClick={() => setFilter(value)}
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
+
+                {hiddenCount > 0 && (
+                  <button
+                    type="button"
+                    className="button-ghost"
+                    onClick={() => setShowHidden((value) => !value)}
+                  >
+                    {showHidden
+                      ? "Hide dismissed"
+                      : `Show ${hiddenCount} dismissed`}
+                  </button>
+                )}
+              </div>
+            </div>
+          </section>
+
+          {vaults.length === 0 ? (
+            <section className="panel mt-6 text-center">
+              <h2 className="text-2xl font-semibold text-white">
+                No vaults found for this wallet yet
+              </h2>
+              <p className="mx-auto mt-3 max-w-2xl text-sm leading-7 text-[#9dbfb7]">
+                If someone just created one for you, give the transaction a bit
+                of time to confirm before checking again.
+              </p>
+            </section>
+          ) : visibleVaults.length === 0 ? (
+            <section className="panel mt-6 text-center">
+              <h2 className="text-2xl font-semibold text-white">
+                No vaults match the current view
+              </h2>
+              <p className="mx-auto mt-3 max-w-2xl text-sm leading-7 text-[#9dbfb7]">
+                Try switching between ready, locked, or dismissed vaults to see
+                the rest of your results.
+              </p>
+            </section>
+          ) : (
+            <section className="mt-6 space-y-4">
+              {visibleVaults.map((vault) => {
+                const ready = isReady(vault);
+                const dismissed = hiddenKeys.has(vaultKey(vault));
+
+                return (
+                  <Link
+                    key={`${vault.outPoint.txHash}-${vault.outPoint.index}`}
+                    to={`/vault/${vault.outPoint.txHash}/${vault.outPoint.index}`}
+                    className="block"
+                  >
+                    <article
+                      className={`panel card-hover ${
+                        dismissed ? "opacity-60" : ""
+                      }`}
+                    >
+                      <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+                        <div>
+                          <div className="section-eyebrow">Vault for you</div>
+                          <h2 className="mt-3 text-3xl font-semibold text-white">
+                            {vault.capacityCKB} CKB
+                          </h2>
+                          {vault.data.memo && (
+                            <p className="mt-3 text-sm leading-7 text-[#d7f6ef]">
+                              {vault.data.memo}
+                            </p>
+                          )}
+                        </div>
+
+                        <div className="flex items-center gap-3">
+                          <div
+                            className={`status-banner !py-2 !text-sm ${
+                              ready
+                                ? "status-banner-success"
+                                : "status-banner-warning"
+                            }`}
+                          >
+                            {ready ? "Claim now" : "Still locked"}
+                          </div>
+
+                          {dismissed ? (
+                            <button
+                              onClick={(event) => handleUnhide(vault, event)}
+                              className="button-ghost !px-3 !py-1.5"
+                            >
+                              Restore
+                            </button>
+                          ) : (
+                            <button
+                              onClick={(event) => handleHide(vault, event)}
+                              className="button-ghost !px-3 !py-1.5"
+                            >
+                              Dismiss
+                            </button>
+                          )}
+                        </div>
+                      </div>
+
+                      <div className="mt-6 grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+                        <div className="metric-card">
+                          <div className="text-xs uppercase tracking-[0.22em] text-[#83e8d4]">
+                            Created by
+                          </div>
+                          <div className="mt-3 text-sm font-semibold text-white">
+                            {vault.data.ownerName || "Unknown"}
+                          </div>
+                          <div className="field-hint mono-text break-all">
+                            {vault.data.ownerAddress || "Unavailable"}
+                          </div>
+                        </div>
+
+                        <div className="metric-card">
+                          <div className="text-xs uppercase tracking-[0.22em] text-[#83e8d4]">
+                            Unlock
+                          </div>
+                          <div className="mt-3 text-sm font-semibold text-white">
+                            {formatUnlock(vault.data.unlock)}
+                          </div>
+                          <div className="field-hint">
+                            {describeUnlock(
+                              vault.data.unlock,
+                              currentBlockHeight,
+                              currentTimestamp
+                            )}
+                          </div>
+                        </div>
+
+                        <div className="metric-card">
+                          <div className="text-xs uppercase tracking-[0.22em] text-[#83e8d4]">
+                            Transaction
+                          </div>
+                          <div className="mt-3 text-sm font-semibold text-white">
+                            {formatAddress(vault.outPoint.txHash, 12, 8)}
+                          </div>
+                        </div>
+
+                        <div className="metric-card">
+                          <div className="text-xs uppercase tracking-[0.22em] text-[#83e8d4]">
+                            Record type
+                          </div>
+                          <div className="mt-3 text-sm font-semibold text-white">
+                            Authenticated scripted vault
+                          </div>
+                        </div>
+                      </div>
+                    </article>
+                  </Link>
+                );
+              })}
+            </section>
+          )}
         </>
       )}
 
-      {/* ── Verify section ────────────────────────────────────────────── */}
       {renderVerifySection()}
     </div>
   );
-
-  // ── Verify sub-component ──────────────────────────────────────────────
-  function renderVerifySection() {
-    return (
-      <div className="bg-gray-800 border border-gray-700 rounded-lg p-4 md:p-6 mt-4">
-        <h2 className="text-xl md:text-2xl font-semibold mb-2">
-          🔍 Verify a Vault
-        </h2>
-        <p className="text-sm opacity-70 mb-4">
-          Received a notification about a vault? Enter the transaction hash to
-          verify it's real and on-chain.
-        </p>
-
-        <div className="space-y-4">
-          <div>
-            <label className="block text-sm font-medium mb-1">
-              Transaction Hash
-            </label>
-            <input
-              type="text"
-              value={verifyTxHash}
-              onChange={(e) => setVerifyTxHash(e.target.value)}
-              placeholder="0x..."
-              className="w-full px-3 py-2 bg-gray-950 border border-gray-700 rounded-lg text-gray-200 text-sm focus:outline-none focus:border-[#00d4aa] transition-colors"
-            />
-          </div>
-          <div>
-            <label className="block text-sm font-medium mb-1">
-              Output Index (usually 0)
-            </label>
-            <input
-              type="number"
-              value={verifyIndex}
-              onChange={(e) => setVerifyIndex(e.target.value)}
-              min={0}
-              className="w-32 px-3 py-2 bg-gray-950 border border-gray-700 rounded-lg text-gray-200 text-sm focus:outline-none focus:border-[#00d4aa] transition-colors"
-            />
-          </div>
-          <button
-            onClick={handleVerify}
-            disabled={verifying}
-            className="bg-gray-600 hover:bg-gray-700 text-white font-semibold px-6 py-2 rounded-lg transition-colors disabled:opacity-50"
-          >
-            {verifying ? "Verifying…" : "Verify Vault"}
-          </button>
-        </div>
-
-        {/* Verify error */}
-        {verifyError && (
-          <div className="bg-red-500 bg-opacity-10 border border-red-500 rounded-lg p-4 mt-4 text-white text-sm">
-            ⚠️ {verifyError}
-          </div>
-        )}
-
-        {/* Verify result */}
-        {verifyResult && (
-          <div className="mt-4 border border-green-600 rounded-lg p-4">
-            <div className="flex items-center gap-2 mb-3">
-              <span className="inline-block w-3 h-3 rounded-full bg-green-500" />
-              <span className="text-green-400 font-semibold">
-                ✓ Vault Verified On-Chain
-              </span>
-            </div>
-
-            <div className="space-y-3 text-sm">
-              <div>
-                <span className="opacity-70">Amount: </span>
-                <span className="font-semibold">
-                  {verifyResult.capacityCKB} CKB
-                </span>
-              </div>
-              <div>
-                <span className="opacity-70">From: </span>
-                <span className="font-semibold">
-                  {verifyResult.data.ownerName || "Unknown"}{" "}
-                </span>
-                <span className="font-mono text-xs opacity-60 break-all">
-                  ({verifyResult.data.ownerAddress.slice(0, 12)}...
-                  {verifyResult.data.ownerAddress.slice(-6)})
-                </span>
-              </div>
-              <div>
-                <span className="opacity-70">Unlocks: </span>
-                <span>{formatUnlock(verifyResult)}</span>
-              </div>
-              {verifyResult.data.memo && (
-                <div>
-                  <span className="opacity-70">Memo: </span>
-                  <span>{verifyResult.data.memo}</span>
-                </div>
-              )}
-              <div>
-                <span className="opacity-70">Tx Status: </span>
-                <span className="capitalize">{verifyResult.txStatus}</span>
-              </div>
-              <div>
-                <span className="opacity-70">Cell: </span>
-                <span>
-                  {verifyResult.isLive ? (
-                    <span className="text-green-400">Live (unclaimed)</span>
-                  ) : (
-                    <span className="text-red-400">
-                      Spent (already claimed)
-                    </span>
-                  )}
-                </span>
-              </div>
-              <div className="flex flex-wrap gap-3 pt-2">
-                <a
-                  href={explorerTxUrl(verifyResult.outPoint.txHash)}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="text-[#00d4aa] hover:underline text-sm"
-                >
-                  View on Explorer ↗
-                </a>
-                <Link
-                  to={`/vault/${verifyResult.outPoint.txHash}/${verifyResult.outPoint.index}`}
-                  className="text-[#00d4aa] hover:underline text-sm"
-                >
-                  View Details →
-                </Link>
-              </div>
-            </div>
-          </div>
-        )}
-      </div>
-    );
-  }
 }

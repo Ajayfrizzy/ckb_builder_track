@@ -1,125 +1,157 @@
-// ─────────────────────────────────────────────────────────────────────────────
-// InheritVault – Cell Data Codec
-//
-// Encodes/decodes vault metadata into the CKB cell's output_data field.
-//
-// Format:
-//   Bytes 0-3:  Magic identifier "IVLT" (0x49564C54)
-//   Byte  4:    Version (0x01)
-//   Bytes 5+:   JSON payload (UTF-8)
-//
-// JSON payload uses short keys to save on-chain capacity:
-//   oa  – owner CKB address (string)
-//   on  – owner display name (string, optional)
-//   ut  – unlock type ("blockHeight" | "timestamp")
-//   uv  – unlock value (number)
-//   m   – memo (string, optional)
-// ─────────────────────────────────────────────────────────────────────────────
+// -----------------------------------------------------------------------------
+// InheritVault - Molecule-backed cell data codec
+// -----------------------------------------------------------------------------
 
-import type { UnlockType } from "../types";
+import { mol } from "@ckb-cobuild/molecule";
+import type { CkbScript, UnlockType } from "../types";
 
-const MAGIC_HEX = "49564c54"; // ASCII "IVLT"
-const VERSION = 0x01;
-
-/**
- * The data stored inside a vault cell's output_data (decoded form).
- */
 export interface VaultCellPayload {
-  ownerAddress: string;
+  ownerLock: {
+    codeHash: string;
+    hashType: CkbScript["hash_type"];
+    args: string;
+  };
+  ownerAddress?: string;
   ownerName?: string;
   unlock: { type: UnlockType; value: number };
   memo?: string;
 }
 
-// ── Encode ──────────────────────────────────────────────────────────────────
+const Byte32 = mol.byteArray("Byte32", 32);
+const Bytes = mol.byteFixvec("Bytes");
+const ScriptCodec = mol.table(
+  "Script",
+  {
+    code_hash: Byte32,
+    hash_type: mol.byte,
+    args: Bytes,
+  },
+  ["code_hash", "hash_type", "args"]
+);
+const VaultCellDataCodec = mol.table(
+  "VaultCellData",
+  {
+    owner_lock: ScriptCodec,
+    owner_name: Bytes,
+    unlock_type: mol.byte,
+    unlock_value: mol.Uint64,
+    memo: Bytes,
+  },
+  ["owner_lock", "owner_name", "unlock_type", "unlock_value", "memo"]
+);
 
-/** Encode vault metadata into a 0x-prefixed hex string for cell output_data. */
-export function encodeVaultCellData(payload: VaultCellPayload): string {
-  const json: Record<string, unknown> = {
-    oa: payload.ownerAddress,
-    ut: payload.unlock.type,
-    uv: payload.unlock.value,
-  };
-  if (payload.ownerName) json.on = payload.ownerName;
-  if (payload.memo) json.m = payload.memo;
+const HASH_TYPE_TO_BYTE: Record<CkbScript["hash_type"], number> = {
+  data: 0x00,
+  type: 0x01,
+  data1: 0x02,
+  data2: 0x04,
+};
 
-  const jsonBytes = new TextEncoder().encode(JSON.stringify(json));
+const BYTE_TO_HASH_TYPE: Record<number, CkbScript["hash_type"]> = {
+  0x00: "data",
+  0x01: "type",
+  0x02: "data1",
+  0x04: "data2",
+};
 
-  // magic (4 B) + version (1 B) + JSON bytes
-  let hex = MAGIC_HEX + VERSION.toString(16).padStart(2, "0");
-  for (const b of jsonBytes) {
-    hex += b.toString(16).padStart(2, "0");
-  }
-  return "0x" + hex;
+function textToBytes(value: string): Uint8Array {
+  return new TextEncoder().encode(value);
 }
 
-// ── Decode ──────────────────────────────────────────────────────────────────
+function bytesToText(value: Uint8Array): string {
+  return new TextDecoder().decode(value);
+}
 
-/** Decode vault cell data from a 0x-prefixed hex string. Returns null if invalid. */
-export function decodeVaultCellData(hex: string): VaultCellPayload | null {
-  const data = hex.startsWith("0x") ? hex.slice(2) : hex;
+function bytesToHex(bytes: Uint8Array): string {
+  return `0x${Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("")}`;
+}
 
-  // Minimum: magic (8) + version (2) + at least a few JSON chars
-  if (data.length < 12) return null;
-
-  // Check magic
-  if (data.slice(0, 8).toLowerCase() !== MAGIC_HEX) return null;
-
-  // Check version
-  const version = parseInt(data.slice(8, 10), 16);
-  if (version !== VERSION) return null;
-
-  // Decode JSON bytes
-  const jsonHex = data.slice(10);
-  const bytes = new Uint8Array(jsonHex.length / 2);
-  for (let i = 0; i < bytes.length; i++) {
-    bytes[i] = parseInt(jsonHex.slice(i * 2, i * 2 + 2), 16);
+function hexToBytes(hex: string): Uint8Array {
+  const source = hex.startsWith("0x") ? hex.slice(2) : hex;
+  if (source.length % 2 !== 0) {
+    throw new Error("Invalid hex length");
   }
 
+  const bytes = new Uint8Array(source.length / 2);
+  for (let index = 0; index < bytes.length; index += 1) {
+    bytes[index] = parseInt(source.slice(index * 2, index * 2 + 2), 16);
+  }
+  return bytes;
+}
+
+function toHashTypeByte(hashType: CkbScript["hash_type"]): number {
+  return HASH_TYPE_TO_BYTE[hashType];
+}
+
+function toHashType(byte: number): CkbScript["hash_type"] {
+  const hashType = BYTE_TO_HASH_TYPE[byte];
+  if (!hashType) {
+    throw new Error(`Unsupported hash type byte: ${byte}`);
+  }
+  return hashType;
+}
+
+function normalizeBytesHex(hex: string, expectedLength?: number): string {
+  const bytes = hexToBytes(hex);
+  if (expectedLength != null && bytes.length !== expectedLength) {
+    throw new Error(
+      `Expected ${expectedLength} bytes, found ${bytes.length}`
+    );
+  }
+  return bytesToHex(bytes);
+}
+
+export function exportVaultMoleculeSchema(): string {
+  return Array.from(VaultCellDataCodec.exportSchema().values()).join("\n");
+}
+
+export function encodeVaultCellData(payload: VaultCellPayload): string {
+  const packed = VaultCellDataCodec.pack({
+    owner_lock: {
+      code_hash: hexToBytes(normalizeBytesHex(payload.ownerLock.codeHash, 32)),
+      hash_type: toHashTypeByte(payload.ownerLock.hashType),
+      args: hexToBytes(normalizeBytesHex(payload.ownerLock.args)),
+    },
+    owner_name: textToBytes(payload.ownerName || ""),
+    unlock_type: payload.unlock.type === "timestamp" ? 1 : 0,
+    unlock_value: BigInt(payload.unlock.value),
+    memo: textToBytes(payload.memo || ""),
+  });
+
+  return bytesToHex(packed);
+}
+
+export function decodeVaultCellData(hex: string): VaultCellPayload | null {
   try {
-    const json = JSON.parse(new TextDecoder().decode(bytes));
+    const decoded = VaultCellDataCodec.unpack(hexToBytes(hex), true);
     return {
-      ownerAddress: json.oa || "",
-      ownerName: json.on || undefined,
-      unlock: {
-        type: json.ut as UnlockType,
-        value: json.uv as number,
+      ownerLock: {
+        codeHash: bytesToHex(decoded.owner_lock.code_hash),
+        hashType: toHashType(decoded.owner_lock.hash_type),
+        args: bytesToHex(decoded.owner_lock.args),
       },
-      memo: json.m || undefined,
+      ownerName: bytesToText(decoded.owner_name) || undefined,
+      unlock: {
+        type: decoded.unlock_type === 1 ? "timestamp" : "blockHeight",
+        value: Number(decoded.unlock_value),
+      },
+      memo: bytesToText(decoded.memo) || undefined,
     };
-  } catch {
+  } catch (error) {
+    console.error("Failed to decode Vault Molecule payload:", error);
     return null;
   }
 }
 
-// ── Helpers ─────────────────────────────────────────────────────────────────
-
-/** Check if a hex cell data string starts with the IVLT magic. */
-export function isVaultCell(hex: string): boolean {
-  const data = hex.startsWith("0x") ? hex.slice(2) : hex;
-  return data.length >= 8 && data.slice(0, 8).toLowerCase() === MAGIC_HEX;
-}
-
-/** The 0x-prefixed hex prefix used for indexer output_data filtering. */
-export const VAULT_DATA_PREFIX = "0x" + MAGIC_HEX + VERSION.toString(16).padStart(2, "0");
-
-/** Compute the byte-length of the encoded cell data for a given payload. */
 export function calculateDataSize(payload: VaultCellPayload): number {
   const encoded = encodeVaultCellData(payload);
-  return (encoded.length - 2) / 2; // subtract "0x", each hex pair = 1 byte
+  return (encoded.length - 2) / 2;
 }
 
-/**
- * Calculate the minimum CKB capacity needed for a vault cell.
- *
- * CKB rule: capacity (shannons) >= occupied_bytes × 10^8
- * Occupied bytes = 8 (capacity field) + lock_script_size + data_size
- * For secp256k1-blake160 lock: ~53 bytes
- */
 export function calculateMinCapacityCKB(payload: VaultCellPayload): number {
   const dataSize = calculateDataSize(payload);
-  const CAPACITY_FIELD = 8;
-  const LOCK_SCRIPT_APPROX = 53; // secp256k1-blake160
-  const MARGIN = 2;
-  return CAPACITY_FIELD + LOCK_SCRIPT_APPROX + dataSize + MARGIN;
+  const capacityField = 8;
+  const scriptedLockApprox = 65;
+  const typeScriptApprox = 97;
+  return capacityField + scriptedLockApprox + typeScriptApprox + dataSize;
 }

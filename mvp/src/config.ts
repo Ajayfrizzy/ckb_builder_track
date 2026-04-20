@@ -4,6 +4,18 @@
 // -----------------------------------------------------------------------------
 
 export type Network = "testnet" | "mainnet";
+export type ScriptHashType = "type" | "data" | "data1" | "data2";
+export type DepType = "code" | "depGroup";
+
+export interface ScriptDeployment {
+  codeHash: string;
+  hashType: ScriptHashType;
+  outPoint: {
+    txHash: string;
+    index: number;
+  };
+  depType: DepType;
+}
 
 export interface NetworkConfig {
   rpcUrl: string;
@@ -43,18 +55,54 @@ export function getIndexerUrls(network: Network): string[] {
   return Array.from(new Set([indexerUrl, ...indexerUrls]));
 }
 
-// Minimum CKB capacity for a vault cell.
-// Cell overhead ~= 61 bytes (8 capacity + 53 lock script).
-// Vault data ~= 80-200 bytes (magic + version + JSON payload).
-// Total ~= 141-261 bytes -> 141-261 CKB minimum.
-// We set 250 CKB as the safe floor; the UI calculates the exact minimum
-// dynamically based on the data payload size.
 export const MIN_VAULT_CKB = 250;
+export const TIMESTAMP_CLAIM_BUFFER_SECONDS = 120;
+export const MIN_TIMESTAMP_UNLOCK_LEAD_SECONDS = 600;
 
-// -----------------------------------------------------------------------------
-// Email notifications (Resend via Vercel serverless function)
-// In production on Vercel this defaults to "/api/send-email".
-// For local dev, set VITE_EMAIL_API_URL in .env.
-// -----------------------------------------------------------------------------
 export const EMAIL_API_URL =
   import.meta.env.VITE_EMAIL_API_URL ?? "/api/send-email";
+
+export interface VaultScriptConfig {
+  lock: ScriptDeployment | null;
+  type: ScriptDeployment | null;
+}
+
+export const VAULT_SCRIPT_DEPLOYMENTS: Record<Network, VaultScriptConfig> = {
+  testnet: {
+    lock: {
+      codeHash:
+        "0xf6898d947d866763e5e51560940354554abed36060bc63a3a4b6abab4df7fee1",
+      hashType: "type",
+      outPoint: {
+        txHash:
+          "0x090f54d28a1863879d88fbc37a83c7ce61724993d5095cc7e9470a0c94b588fc",
+        index: 0,
+      },
+      depType: "code",
+    },
+    type: {
+      codeHash:
+        "0x43142c6355bbe4db242f423cd8e4411c397b57cc6880d17fd3d054ae3c3e0c0e",
+      hashType: "type",
+      outPoint: {
+        txHash:
+          "0x090f54d28a1863879d88fbc37a83c7ce61724993d5095cc7e9470a0c94b588fc",
+        index: 1,
+      },
+      depType: "code",
+    },
+  },
+  mainnet: {
+    lock: null,
+    type: null,
+  },
+};
+
+export function getVaultScriptConfig(network: Network): VaultScriptConfig {
+  return VAULT_SCRIPT_DEPLOYMENTS[network];
+}
+
+export function isVaultScriptsReady(network: Network): boolean {
+  const config = getVaultScriptConfig(network);
+  return Boolean(config.lock && config.type);
+}

@@ -1,100 +1,188 @@
 // -----------------------------------------------------------------------------
-// InheritVault - On-Chain Vault Indexer
-//
-// Queries the CKB Indexer for vault cells and decodes their metadata.
-// This replaces localStorage as the source of truth for vault data.
+// InheritVault - On-chain vault discovery and verification
 // -----------------------------------------------------------------------------
 
-import { getIndexerUrls, type Network } from "../config";
-import { getAddressFromIndexerLock } from "./ccc";
-import { getCellByOutPoint, getTransactionStatus } from "./ckb";
+import { getIndexerUrls, isVaultScriptsReady, type Network } from "../config";
+import type {
+  CkbCellOutput,
+  CkbScript,
+  VaultAuthenticity,
+  VaultFormat,
+} from "../types";
+import {
+  getAddressFromCccScript,
+  getAddressFromIndexerLock,
+  getBeneficiaryAddressFromScriptedLock,
+} from "./ccc";
+import {
+  getBlockTimestampByHash,
+  getCellByOutPoint,
+  getTransactionStatus,
+} from "./ckb";
 import {
   decodeVaultCellData,
-  isVaultCell,
-  VAULT_DATA_PREFIX,
   type VaultCellPayload,
 } from "./codec";
+import {
+  getScriptedVaultTypeArgs,
+  getVaultTypeDeployment,
+  isScriptedVaultType,
+} from "./vaultScripts";
 
-/** Lock script in CKB-RPC snake_case format (for indexer queries). */
-export interface IndexerScript {
-  code_hash: string;
-  hash_type: string;
-  args: string;
-}
-
-/** A vault that exists on-chain as a live cell. */
 export interface OnChainVault {
   outPoint: { txHash: string; index: number };
   capacityCKB: string;
-  beneficiaryLock: IndexerScript;
+  beneficiaryLock: CkbScript;
+  beneficiaryAddress: string;
   data: VaultCellPayload;
   blockNumber?: number;
+  blockTimestamp?: number;
   status: "live";
+  format: "scripted";
+  authenticity: "verified";
 }
 
-/** A vault read from a transaction (may or may not still be live). */
 export interface VaultFromTx {
   outPoint: { txHash: string; index: number };
   capacityCKB: string;
-  beneficiaryLock: IndexerScript;
+  beneficiaryLock: CkbScript;
   beneficiaryAddress: string;
   data: VaultCellPayload;
   txStatus: "pending" | "proposed" | "committed" | "rejected" | "unknown";
   isLive: boolean;
   blockNumber?: number;
+  blockTimestamp?: number;
+  format: VaultFormat;
+  authenticity: VaultAuthenticity;
+  isAuthentic: boolean;
 }
 
-const prefixSupportByIndexerUrl = new Map<string, boolean>();
+function capacityHexToCkb(capacityHex: string): string {
+  return (parseInt(capacityHex, 16) / 1e8).toString();
+}
 
-function parseVaultCell(cell: any): OnChainVault | null {
+function normalizeLock(output: CkbCellOutput): CkbScript {
+  return {
+    code_hash: output.lock.code_hash,
+    hash_type: output.lock.hash_type,
+    args: output.lock.args,
+  };
+}
+
+async function hydrateVaultPayload(
+  network: Network,
+  payload: VaultCellPayload
+): Promise<VaultCellPayload> {
+  const ownerAddress = await getAddressFromCccScript(payload.ownerLock, network).catch(
+    () => undefined
+  );
+
+  return {
+    ...payload,
+    ownerAddress,
+  };
+}
+
+async function parseScriptedVaultCell(network: Network, cell: any): Promise<OnChainVault | null> {
   const decoded = decodeVaultCellData(cell.output_data);
   if (!decoded) return null;
+
+  const beneficiaryLock = {
+    code_hash: cell.output.lock.code_hash,
+    hash_type: cell.output.lock.hash_type,
+    args: cell.output.lock.args,
+  } as CkbScript;
 
   return {
     outPoint: {
       txHash: cell.out_point.tx_hash,
       index: parseInt(cell.out_point.index, 16),
     },
-    capacityCKB: (parseInt(cell.output.capacity, 16) / 1e8).toString(),
-    beneficiaryLock: {
-      code_hash: cell.output.lock.code_hash,
-      hash_type: cell.output.lock.hash_type,
-      args: cell.output.lock.args,
-    },
-    data: decoded,
-    blockNumber: cell.block_number
-      ? parseInt(cell.block_number, 16)
-      : undefined,
+    capacityCKB: capacityHexToCkb(cell.output.capacity),
+    beneficiaryLock,
+    beneficiaryAddress: await getBeneficiaryAddressFromScriptedLock(
+      beneficiaryLock,
+      network
+    ).catch(() => ""),
+    data: await hydrateVaultPayload(network, decoded),
+    blockNumber: cell.block_number ? parseInt(cell.block_number, 16) : undefined,
+    blockTimestamp: undefined,
     status: "live",
+    format: "scripted",
+    authenticity: "verified",
+  };
+}
+
+async function parseVaultFromTransactionOutput(
+  network: Network,
+  txHash: string,
+  index: number,
+  output: CkbCellOutput,
+  outputData: string,
+  txStatus: VaultFromTx["txStatus"],
+  isLive: boolean,
+  blockNumber?: number
+  ,
+  blockTimestamp?: number
+): Promise<VaultFromTx | null> {
+  const decoded = decodeVaultCellData(outputData);
+  if (!decoded) return null;
+
+  const beneficiaryLock = normalizeLock(output);
+  const scripted = isScriptedVaultType(output.type, network);
+
+  const beneficiaryAddress = scripted
+    ? await getBeneficiaryAddressFromScriptedLock(beneficiaryLock, network).catch(() => "")
+    : await getAddressFromIndexerLock(beneficiaryLock, network).catch(() => "");
+
+  return {
+    outPoint: { txHash, index },
+    capacityCKB: capacityHexToCkb(output.capacity),
+    beneficiaryLock,
+    beneficiaryAddress,
+    data: await hydrateVaultPayload(network, decoded),
+    txStatus,
+    isLive,
+    blockNumber,
+    blockTimestamp,
+    format: scripted ? "scripted" : "legacy",
+    authenticity: scripted ? "verified" : "legacy",
+    isAuthentic: scripted,
   };
 }
 
 async function fetchVaultsForLockScriptFromIndexer(
+  network: Network,
   indexerUrl: string,
-  lockScript: IndexerScript,
-  usePrefixFilter: boolean
+  lockScript: CkbScript
 ): Promise<OnChainVault[]> {
+  const typeDeployment = getVaultTypeDeployment(network);
+  if (!typeDeployment) {
+    throw new Error(
+      `Vault scripts are not configured for ${network}. Beneficiary discovery is unavailable until the deployment metadata is added.`
+    );
+  }
+
   const vaults: OnChainVault[] = [];
   let cursor: string | null = null;
 
-  // eslint-disable-next-line no-constant-condition
   while (true) {
     const searchKey: Record<string, unknown> = {
       script: {
-        code_hash: lockScript.code_hash,
-        hash_type: lockScript.hash_type,
-        args: lockScript.args,
+        code_hash: typeDeployment.codeHash,
+        hash_type: typeDeployment.hashType,
+        args: getScriptedVaultTypeArgs(network),
       },
-      script_type: "lock",
+      script_type: "type",
       with_data: true,
+      filter: {
+        script: {
+          code_hash: lockScript.code_hash,
+          hash_type: lockScript.hash_type,
+          args: lockScript.args,
+        },
+      },
     };
-
-    if (usePrefixFilter) {
-      searchKey.filter = {
-        output_data: VAULT_DATA_PREFIX,
-        output_data_filter_mode: "prefix",
-      };
-    }
 
     const params: unknown[] = [searchKey, "desc", "0x64"];
     if (cursor) params.push(cursor);
@@ -117,13 +205,9 @@ async function fetchVaultsForLockScriptFromIndexer(
 
     const objects: any[] = json.result?.objects ?? [];
 
-    if (usePrefixFilter && objects.some((cell) => !isVaultCell(cell.output_data))) {
-      throw new Error("INDEXER_PREFIX_FILTER_UNSUPPORTED");
-    }
-
     for (const cell of objects) {
-      if (!usePrefixFilter && !isVaultCell(cell.output_data)) continue;
-      const parsed = parseVaultCell(cell);
+      if (!isScriptedVaultType(cell.output.type, network)) continue;
+      const parsed = await parseScriptedVaultCell(network, cell);
       if (parsed) vaults.push(parsed);
     }
 
@@ -134,74 +218,32 @@ async function fetchVaultsForLockScriptFromIndexer(
   return vaults;
 }
 
-/**
- * Fetch all live vault cells whose lock script matches the given one.
- * Useful for the beneficiary dashboard: "show me all vaults destined for me."
- */
 export async function fetchVaultsForLockScript(
   network: Network,
-  lockScript: IndexerScript
+  lockScript: CkbScript
 ): Promise<OnChainVault[]> {
-  for (const indexerUrl of getIndexerUrls(network)) {
-    try {
-      if (prefixSupportByIndexerUrl.get(indexerUrl) === false) {
-        continue;
-      }
-
-      const vaults = await fetchVaultsForLockScriptFromIndexer(
-        indexerUrl,
-        lockScript,
-        true
-      );
-      prefixSupportByIndexerUrl.set(indexerUrl, true);
-      return vaults;
-    } catch (err) {
-      if (err instanceof Error && err.message === "INDEXER_PREFIX_FILTER_UNSUPPORTED") {
-        prefixSupportByIndexerUrl.set(indexerUrl, false);
-        console.warn(
-          `Indexer ${indexerUrl} ignored output_data_filter_mode="prefix"; trying the next configured endpoint.`
-        );
-        continue;
-      }
-
-      console.error(`Indexer fetch failed for ${indexerUrl}:`, err);
-    }
+  if (!isVaultScriptsReady(network)) {
+    throw new Error(
+      `Vault scripts are not configured for ${network}. Beneficiary discovery is disabled until the deployment metadata is added.`
+    );
   }
 
-  return fetchVaultsForLockScriptFallback(network, lockScript);
-}
-
-/**
- * Fallback when the indexer doesn't support output_data filtering.
- * Fetches all cells for the lock script and filters client-side by magic bytes.
- */
-async function fetchVaultsForLockScriptFallback(
-  network: Network,
-  lockScript: IndexerScript
-): Promise<OnChainVault[]> {
   let lastError: Error | null = null;
-
   for (const indexerUrl of getIndexerUrls(network)) {
     try {
-      return await fetchVaultsForLockScriptFromIndexer(indexerUrl, lockScript, false);
-    } catch (err) {
-      const error = err instanceof Error ? err : new Error("Unknown indexer error");
-      console.error(`Fallback indexer fetch failed for ${indexerUrl}:`, error);
-      lastError = error;
+      return await fetchVaultsForLockScriptFromIndexer(network, indexerUrl, lockScript);
+    } catch (error) {
+      const normalized =
+        error instanceof Error ? error : new Error("Unknown indexer error");
+      console.error(`Indexer fetch failed for ${indexerUrl}:`, normalized);
+      lastError = normalized;
     }
   }
 
-  if (lastError) {
-    throw lastError;
-  }
-
+  if (lastError) throw lastError;
   return [];
 }
 
-/**
- * Fetch vault data from a transaction (works even if the cell is already spent).
- * Also checks whether the cell is currently live.
- */
 export async function fetchVaultFromTransaction(
   network: Network,
   txHash: string,
@@ -212,44 +254,35 @@ export async function fetchVaultFromTransaction(
 
   const output = txResult.transaction.outputs[index];
   const outputData = txResult.transaction.outputs_data[index];
-  if (!output || !outputData) return null;
-  if (!isVaultCell(outputData)) return null;
-
-  const decoded = decodeVaultCellData(outputData);
-  if (!decoded) return null;
+  if (!output || outputData === undefined) return null;
 
   const txStatus = txResult.tx_status?.status ?? "unknown";
-  const beneficiaryLock = {
-    code_hash: output.lock.code_hash,
-    hash_type: output.lock.hash_type,
-    args: output.lock.args,
-  };
-  const beneficiaryAddress = await getAddressFromIndexerLock(
-    beneficiaryLock,
-    network
-  ).catch(() => "");
-  const liveCell = txStatus === "committed"
-    ? await getCellByOutPoint(network, { txHash, index })
-    : null;
+  const liveCell =
+    txStatus === "committed"
+      ? await getCellByOutPoint(network, { txHash, index })
+      : null;
+  const blockTimestamp =
+    txResult.tx_status?.block_hash && txStatus === "committed"
+      ? await getBlockTimestampByHash(network, txResult.tx_status.block_hash).catch(
+          () => null
+        )
+      : null;
 
-  return {
-    outPoint: { txHash, index },
-    capacityCKB: (parseInt(output.capacity, 16) / 1e8).toString(),
-    beneficiaryLock,
-    beneficiaryAddress,
-    data: decoded,
+  return parseVaultFromTransactionOutput(
+    network,
+    txHash,
+    index,
+    output,
+    outputData,
     txStatus,
-    isLive: liveCell !== null,
-    blockNumber: txResult.tx_status?.block_number
+    liveCell !== null,
+    txResult.tx_status?.block_number
       ? parseInt(txResult.tx_status.block_number, 16)
       : undefined,
-  };
+    blockTimestamp ?? undefined
+  );
 }
 
-/**
- * Verify that a vault is authentic by reading on-chain data.
- * Returns the full vault info if valid, or null if not a valid InheritVault cell.
- */
 export async function verifyVault(
   network: Network,
   txHash: string,
