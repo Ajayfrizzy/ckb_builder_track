@@ -2,11 +2,7 @@ import { useState, useEffect } from "react";
 import { Link } from "react-router-dom";
 import { ccc } from "@ckb-ccc/connector-react";
 import CopyButton from "../components/CopyButton";
-import {
-  DEFAULT_NETWORK,
-  NETWORK_CONFIGS,
-  isVaultScriptsReady,
-} from "../config";
+import { isVaultScriptsReady } from "../config";
 import { getTipHeader } from "../lib/ckb";
 import { getScriptedVaultLockForIndexer, isUnlockConditionSatisfied } from "../lib/ccc";
 import { getHiddenVaults, hideVault, unhideVault } from "../lib/storage";
@@ -19,23 +15,28 @@ import {
 import {
   describeUnlock,
   formatAddress,
+  formatDateTime,
   formatUnlock,
 } from "../lib/display";
+import {
+  buildVaultDetailPath,
+  getActiveNetwork,
+  getExplorerTransactionUrl,
+  getNetworkLabel,
+} from "../lib/network";
 
 type BeneficiaryFilter = "all" | "ready" | "locked";
-
-function explorerTxUrl(txHash: string) {
-  return `${NETWORK_CONFIGS[DEFAULT_NETWORK].explorerTxUrl}${txHash}`;
-}
 
 function vaultKey(vault: OnChainVault) {
   return `${vault.outPoint.txHash}:${vault.outPoint.index}`;
 }
 
 export default function BeneficiaryPage() {
-  const { wallet, open } = ccc.useCcc();
+  const { wallet, open, client } = ccc.useCcc();
   const signer = ccc.useSigner();
-  const scriptsReady = isVaultScriptsReady(DEFAULT_NETWORK);
+  const activeNetwork = getActiveNetwork(signer?.client ?? client);
+  const scriptsReady = isVaultScriptsReady(activeNetwork);
+  const networkLabel = getNetworkLabel(activeNetwork);
 
   const [vaults, setVaults] = useState<OnChainVault[]>([]);
   const [loading, setLoading] = useState(false);
@@ -48,6 +49,8 @@ export default function BeneficiaryPage() {
   const [currentTimestamp, setCurrentTimestamp] = useState(
     Math.floor(Date.now() / 1000)
   );
+  const [lastSyncedAt, setLastSyncedAt] = useState("");
+  const [refreshNonce, setRefreshNonce] = useState(0);
 
   const [verifyTxHash, setVerifyTxHash] = useState("");
   const [verifyIndex, setVerifyIndex] = useState("0");
@@ -66,7 +69,7 @@ export default function BeneficiaryPage() {
       try {
         const [nextAddress, tip] = await Promise.all([
           signer.getRecommendedAddress(),
-          getTipHeader(DEFAULT_NETWORK),
+          getTipHeader(activeNetwork),
         ]);
 
         if (cancelled) return;
@@ -78,12 +81,13 @@ export default function BeneficiaryPage() {
         const scriptedLock = await getScriptedVaultLockForIndexer(
           nextAddress,
           signer,
-          DEFAULT_NETWORK
+          activeNetwork
         );
 
-        const results = await fetchVaultsForLockScript(DEFAULT_NETWORK, scriptedLock);
+        const results = await fetchVaultsForLockScript(activeNetwork, scriptedLock);
         if (!cancelled) {
           setVaults(results);
+          setLastSyncedAt(new Date().toISOString());
         }
       } catch (err: any) {
         console.error("Failed to fetch beneficiary vaults:", err);
@@ -100,7 +104,7 @@ export default function BeneficiaryPage() {
     return () => {
       cancelled = true;
     };
-  }, [signer, scriptsReady]);
+  }, [signer, scriptsReady, refreshNonce, activeNetwork]);
 
   const handleVerify = async () => {
     setVerifyError("");
@@ -115,7 +119,7 @@ export default function BeneficiaryPage() {
     setVerifying(true);
     try {
       const result = await verifyVault(
-        DEFAULT_NETWORK,
+        activeNetwork,
         hash,
         parseInt(verifyIndex || "0", 10)
       );
@@ -167,7 +171,7 @@ export default function BeneficiaryPage() {
     <details className="disclosure mt-6">
       <summary className="disclosure-summary">
         <div>
-          <div className="font-semibold text-white">Advanced tools</div>
+          <div className="font-semibold text-white">Recovery tools</div>
           <div className="disclosure-copy">
             Verify a vault directly from its transaction hash and output index.
           </div>
@@ -286,14 +290,14 @@ export default function BeneficiaryPage() {
                   Memo
                 </div>
                 <div className="mt-3 text-sm leading-7 text-[#d7f6ef]">
-                  {verifyResult.data.memo}
+                {verifyResult.data.memo}
                 </div>
               </div>
             )}
 
             <div className="mt-5 flex flex-col gap-3 sm:flex-row">
               <a
-                href={explorerTxUrl(verifyResult.outPoint.txHash)}
+                href={getExplorerTransactionUrl(activeNetwork, verifyResult.outPoint.txHash)}
                 target="_blank"
                 rel="noopener noreferrer"
                 className="button-secondary"
@@ -301,7 +305,11 @@ export default function BeneficiaryPage() {
                 View on Explorer
               </a>
               <Link
-                to={`/vault/${verifyResult.outPoint.txHash}/${verifyResult.outPoint.index}`}
+                to={buildVaultDetailPath(
+                  verifyResult.outPoint.txHash,
+                  verifyResult.outPoint.index,
+                  activeNetwork
+                )}
                 className="button-secondary"
               >
                 Open Detail View
@@ -367,6 +375,7 @@ export default function BeneficiaryPage() {
               how much is there, and whether it is still locked or ready to
               claim.
             </p>
+            <p className="field-hint mt-4">Scanning {networkLabel}.</p>
           </div>
 
           <div className="panel-muted !p-5">
@@ -415,18 +424,24 @@ export default function BeneficiaryPage() {
 
           <div className="metric-card">
             <div className="text-xs uppercase tracking-[0.22em] text-[#83e8d4]">
-              Dismissed
+              Hidden on this device
             </div>
             <div className="mt-3 text-3xl font-semibold text-white">
               {hiddenCount}
             </div>
           </div>
         </div>
+
+        {lastSyncedAt && (
+          <div className="mt-6 text-sm text-[#9dbfb7]">
+            Last checked {formatDateTime(lastSyncedAt)}
+          </div>
+        )}
       </section>
 
       {!scriptsReady && (
         <div className="status-banner status-banner-warning mt-6">
-          Vault discovery is not available right now, but the advanced tools
+          Vault discovery is not available right now, but the recovery tools
           below can still verify a vault by transaction hash.
         </div>
       )}
@@ -479,17 +494,27 @@ export default function BeneficiaryPage() {
                   ))}
                 </div>
 
-                {hiddenCount > 0 && (
+                <div className="flex flex-wrap justify-end gap-3">
+                  {hiddenCount > 0 && (
+                    <button
+                      type="button"
+                      className="button-ghost"
+                      onClick={() => setShowHidden((value) => !value)}
+                    >
+                      {showHidden
+                        ? "Hide hidden items"
+                        : `Show ${hiddenCount} hidden`}
+                    </button>
+                  )}
                   <button
                     type="button"
                     className="button-ghost"
-                    onClick={() => setShowHidden((value) => !value)}
+                    onClick={() => setRefreshNonce((value) => value + 1)}
+                    disabled={loading}
                   >
-                    {showHidden
-                      ? "Hide dismissed"
-                      : `Show ${hiddenCount} dismissed`}
+                    {loading ? "Refreshing..." : "Refresh Results"}
                   </button>
-                )}
+                </div>
               </div>
             </div>
           </section>
@@ -510,7 +535,7 @@ export default function BeneficiaryPage() {
                 No vaults match the current view
               </h2>
               <p className="mx-auto mt-3 max-w-2xl text-sm leading-7 text-[#9dbfb7]">
-                Try switching between ready, locked, or dismissed vaults to see
+                Try switching between ready, locked, or hidden vaults to see
                 the rest of your results.
               </p>
             </section>
@@ -523,7 +548,11 @@ export default function BeneficiaryPage() {
                 return (
                   <Link
                     key={`${vault.outPoint.txHash}-${vault.outPoint.index}`}
-                    to={`/vault/${vault.outPoint.txHash}/${vault.outPoint.index}`}
+                    to={buildVaultDetailPath(
+                      vault.outPoint.txHash,
+                      vault.outPoint.index,
+                      activeNetwork
+                    )}
                     className="block"
                   >
                     <article
@@ -567,7 +596,7 @@ export default function BeneficiaryPage() {
                               onClick={(event) => handleHide(vault, event)}
                               className="button-ghost !px-3 !py-1.5"
                             >
-                              Dismiss
+                              Hide
                             </button>
                           )}
                         </div>

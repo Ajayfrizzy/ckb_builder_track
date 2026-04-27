@@ -1,18 +1,27 @@
 import { useState, useEffect } from "react";
 import { Link } from "react-router-dom";
+import { ccc } from "@ckb-ccc/connector-react";
 import { loadVaults, addVault, updateVault } from "../lib/storage";
-import { fetchVaultFromTransaction } from "../lib/vaultIndexer";
+import {
+  fetchVaultFromTransaction,
+  getVaultRecordStatus,
+} from "../lib/vaultIndexer";
 import { getTipHeader } from "../lib/ckb";
 import { isUnlockConditionSatisfied } from "../lib/ccc";
 import { sendVaultClaimableEmail } from "../lib/email";
-import { DEFAULT_NETWORK } from "../config";
+import type { Network } from "../config";
 import {
   describeUnlock,
   formatAddress,
   formatDateTime,
   formatUnlock,
 } from "../lib/display";
-import type { VaultRecord } from "../types";
+import {
+  buildVaultDetailPath,
+  getActiveNetwork,
+  getNetworkLabel,
+} from "../lib/network";
+import type { TipHeader, VaultRecord } from "../types";
 
 type VaultFilter = "all" | "ready" | "live" | "pending" | "spent";
 type VaultSort = "recent" | "unlock" | "amount";
@@ -47,6 +56,13 @@ function getStatusCopy(
     };
   }
 
+  if (vault.status === "unknown") {
+    return {
+      label: "Status unavailable",
+      className: "status-banner-warning",
+    };
+  }
+
   return {
     label: "Live",
     className: "status-banner-neutral",
@@ -54,20 +70,34 @@ function getStatusCopy(
 }
 
 export default function VaultListPage() {
+  const { client } = ccc.useCcc();
+  const activeNetwork = getActiveNetwork(client);
+  const activeNetworkLabel = getNetworkLabel(activeNetwork);
   const [vaults, setVaults] = useState<VaultRecord[]>([]);
   const [importHash, setImportHash] = useState("");
   const [importError, setImportError] = useState("");
   const [importing, setImporting] = useState(false);
   const [filter, setFilter] = useState<VaultFilter>("all");
   const [sortBy, setSortBy] = useState<VaultSort>("recent");
-  const [currentBlockHeight, setCurrentBlockHeight] = useState(0);
-  const [currentTimestamp, setCurrentTimestamp] = useState(
-    Math.floor(Date.now() / 1000)
+  const [tipHeaders, setTipHeaders] = useState<Partial<Record<Network, TipHeader>>>(
+    {}
   );
+  const [refreshing, setRefreshing] = useState(false);
+  const [lastSyncedAt, setLastSyncedAt] = useState("");
+  const [refreshNonce, setRefreshNonce] = useState(0);
+
+  const getTimingForNetwork = (network: Network) => {
+    const tip = tipHeaders[network];
+    return {
+      blockNumber: tip?.blockNumber ?? 0,
+      timestamp: tip?.timestamp ?? Math.floor(Date.now() / 1000),
+    };
+  };
 
   useEffect(() => {
     const refs = loadVaults();
     setVaults(refs);
+    setRefreshing(true);
 
     let cancelled = false;
 
@@ -85,14 +115,11 @@ export default function VaultListPage() {
               vault.index
             );
             if (result) {
-              const newStatus =
-                result.isLive
-                  ? "live"
-                  : result.txStatus === "committed"
-                    ? "spent"
-                    : result.txStatus === "pending" || result.txStatus === "proposed"
-                      ? "pending"
-                      : vault.status;
+              const newStatus = getVaultRecordStatus(
+                result.txStatus,
+                result.liveCellStatus,
+                vault.status
+              );
 
               const merged: VaultRecord = {
                 ...vault,
@@ -123,16 +150,35 @@ export default function VaultListPage() {
       if (changed && !cancelled) {
         setVaults(updated);
       }
+      if (!cancelled) {
+        setLastSyncedAt(new Date().toISOString());
+      }
 
       try {
-        const tip = await getTipHeader(DEFAULT_NETWORK);
+        const networksToRefresh = Array.from(
+          new Set(updated.map((vault) => vault.network))
+        );
+        if (networksToRefresh.length === 0) {
+          networksToRefresh.push(activeNetwork);
+        }
+
+        const nextTips: Partial<Record<Network, TipHeader>> = {};
+        for (const network of networksToRefresh) {
+          try {
+            nextTips[network] = await getTipHeader(network);
+          } catch {
+            // Keep older timing when a network tip cannot be refreshed.
+          }
+        }
+
         if (!cancelled) {
-          setCurrentBlockHeight(tip.blockNumber);
-          setCurrentTimestamp(tip.timestamp);
+          setTipHeaders((previous) => ({ ...previous, ...nextTips }));
         }
 
         for (const vault of updated) {
+          const tip = nextTips[vault.network];
           if (
+            tip &&
             vault.beneficiaryEmail &&
             !vault.claimableEmailSent &&
             vault.status === "live" &&
@@ -163,20 +209,30 @@ export default function VaultListPage() {
         }
       } catch {
         // Claimable email checks are best effort.
+      } finally {
+        if (!cancelled) {
+          setRefreshing(false);
+        }
       }
     })();
 
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [refreshNonce, activeNetwork]);
 
-  const isReady = (vault: VaultRecord) =>
-    vault.status === "live" &&
-    isUnlockConditionSatisfied(vault.unlock, currentBlockHeight, currentTimestamp);
+  const isReady = (vault: VaultRecord) => {
+    const timing = getTimingForNetwork(vault.network);
+    return (
+      vault.status === "live" &&
+      isUnlockConditionSatisfied(vault.unlock, timing.blockNumber, timing.timestamp)
+    );
+  };
 
   const readyCount = vaults.filter(isReady).length;
-  const liveCount = vaults.filter((vault) => vault.status === "live").length;
+  const lockedLiveCount = vaults.filter(
+    (vault) => vault.status === "live" && !isReady(vault)
+  ).length;
   const pendingCount = vaults.filter((vault) => vault.status === "pending").length;
   const spentCount = vaults.filter((vault) => vault.status === "spent").length;
 
@@ -214,16 +270,18 @@ export default function VaultListPage() {
 
     setImporting(true);
     try {
-      const result = await fetchVaultFromTransaction(DEFAULT_NETWORK, hash, 0);
+      const result = await fetchVaultFromTransaction(activeNetwork, hash, 0);
       if (!result) {
-        setImportError("No compatible vault record was found at output index 0.");
+        setImportError(
+          `No compatible vault record was found at output index 0 on ${activeNetworkLabel}.`
+        );
         return;
       }
 
       const record: VaultRecord = {
         txHash: hash,
         index: 0,
-        network: DEFAULT_NETWORK,
+        network: activeNetwork,
         createdAt: result.blockTimestamp
           ? new Date(result.blockTimestamp * 1000).toISOString()
           : new Date().toISOString(),
@@ -235,7 +293,7 @@ export default function VaultListPage() {
         ownerName: result.data.ownerName,
         format: result.format,
         authenticity: result.authenticity,
-        status: result.isLive ? "live" : "spent",
+        status: getVaultRecordStatus(result.txStatus, result.liveCellStatus),
       };
 
       addVault(record);
@@ -274,10 +332,24 @@ export default function VaultListPage() {
             <Link to="/beneficiary" className="button-secondary">
               Open Beneficiary View
             </Link>
+            <button
+              type="button"
+              className="button-ghost"
+              onClick={() => setRefreshNonce((value) => value + 1)}
+              disabled={refreshing}
+            >
+              {refreshing ? "Refreshing..." : "Refresh Status"}
+            </button>
           </div>
         </div>
 
-        <div className="mt-8 grid gap-4 md:grid-cols-4">
+        {lastSyncedAt && (
+          <div className="mt-6 text-sm text-[#9dbfb7]">
+            Last checked {formatDateTime(lastSyncedAt)}
+          </div>
+        )}
+
+        <div className="mt-8 grid gap-4 md:grid-cols-2 xl:grid-cols-5">
           <div className="metric-card">
             <div className="text-xs uppercase tracking-[0.22em] text-[#83e8d4]">
               Saved vaults
@@ -298,19 +370,28 @@ export default function VaultListPage() {
 
           <div className="metric-card">
             <div className="text-xs uppercase tracking-[0.22em] text-[#83e8d4]">
-              Live
+              Live and locked
             </div>
             <div className="mt-3 text-3xl font-semibold text-white">
-              {liveCount}
+              {lockedLiveCount}
             </div>
           </div>
 
           <div className="metric-card">
             <div className="text-xs uppercase tracking-[0.22em] text-[#83e8d4]">
-              Pending / spent
+              Pending
             </div>
             <div className="mt-3 text-3xl font-semibold text-white">
-              {pendingCount + spentCount}
+              {pendingCount}
+            </div>
+          </div>
+
+          <div className="metric-card">
+            <div className="text-xs uppercase tracking-[0.22em] text-[#83e8d4]">
+              Spent
+            </div>
+            <div className="mt-3 text-3xl font-semibold text-white">
+              {spentCount}
             </div>
           </div>
         </div>
@@ -385,19 +466,30 @@ export default function VaultListPage() {
             </Link>
           </div>
         </section>
+      ) : visibleVaults.length === 0 ? (
+        <section className="mt-6 panel text-center">
+          <h2 className="text-2xl font-semibold text-white">
+            No vaults match the current view
+          </h2>
+          <p className="mx-auto mt-3 max-w-2xl text-sm leading-7 text-[#9dbfb7]">
+            Try a different filter or sort order to bring the rest of your saved
+            vaults back into view.
+          </p>
+        </section>
       ) : (
         <section className="mt-6 space-y-4">
           {visibleVaults.map((vault) => {
+            const timing = getTimingForNetwork(vault.network);
             const status = getStatusCopy(
               vault,
-              currentBlockHeight,
-              currentTimestamp
+              timing.blockNumber,
+              timing.timestamp
             );
 
             return (
               <Link
                 key={`${vault.txHash}-${vault.index}`}
-                to={`/vault/${vault.txHash}/${vault.index}`}
+                to={buildVaultDetailPath(vault.txHash, vault.index, vault.network)}
                 className="block"
               >
                 <article className="panel card-hover">
@@ -441,8 +533,8 @@ export default function VaultListPage() {
                       <div className="field-hint">
                         {describeUnlock(
                           vault.unlock,
-                          currentBlockHeight,
-                          currentTimestamp
+                          timing.blockNumber,
+                          timing.timestamp
                         )}
                       </div>
                     </div>
@@ -477,10 +569,10 @@ export default function VaultListPage() {
       <details className="disclosure mt-6">
         <summary className="disclosure-summary">
           <div>
-            <div className="font-semibold text-white">Advanced tools</div>
+            <div className="font-semibold text-white">Recovery tools</div>
             <div className="disclosure-copy">
               Re-import a vault from its transaction hash if your local list is
-              missing.
+              missing from this browser.
             </div>
           </div>
           <span className="text-sm font-semibold text-[#83e8d4]">Open</span>
@@ -506,8 +598,9 @@ export default function VaultListPage() {
               </button>
             </div>
             <div className="field-hint">
-              This checks output index 0 first and restores the vault into your
-              local list when it finds a matching record.
+              This checks output index 0 on {activeNetworkLabel} first and
+              restores the vault into your local list when it finds a matching
+              record.
             </div>
 
             {importError && (
