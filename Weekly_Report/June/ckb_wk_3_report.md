@@ -5,7 +5,7 @@
 
 ## Devlog
 
-[Click here to access the post]()
+[Click here to access the post](https://www.linkedin.com/posts/ajayfrizzy_blockchain-web3-ckb-ugcPost-7472592393536684032--hRk/?utm_source=share&utm_medium=member_desktop&rcm=ACoAADT57K8B-8YmvZXnseL7vlXYJjf5QB9IiPg)
 
 ## Github Link
 
