@@ -5,7 +5,7 @@
 
 ## Devlog
 
-[Click here to access the post]()
+[Click here to access the post](https://lnkd.in/p/eAnS9RV6)
 
 ## Github Link
 
